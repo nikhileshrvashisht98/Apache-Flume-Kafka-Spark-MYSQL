@@ -1,0 +1,334 @@
+-------------CREATE A DIRECTORY IN HDFS FOR FLUME TO WRITE TO-----------
+
+hdfs dfs -mkdir /iot_data
+
+-------------START THE KAFKA BROKER IN THE BACKGROUND-----------
+
+nohup bin/kafka-server-start etc/kafka/server.properties > /dev/null 2>&1 &
+
+-------------CREATE AND START KAFKA TOPIC - IDLE-----------
+
+bin/kafka-topics --create --zookeeper localhost:2181 --replication-factor 1 --partitions 3 --topic idle
+
+bin/kafka-console-consumer --bootstrap-server localhost:9092 --topic idle
+
+-------------CREATE AND START KAFKA TOPIC ACTIVE-----------
+
+bin/kafka-topics --create --zookeeper localhost:2181 --replication-factor 1 --partitions 3 --topic active
+
+bin/kafka-console-consumer --bootstrap-server localhost:9092 --topic active
+
+-------------FLUME CONFIG FILE-----------
+
+agent.sources = tail-source
+agent.sinks = hdfs-sink
+agent.channels = memory-channel
+
+agent.sources.tail-source.type = spooldir
+agent.sources.tail-source.spoolDir = /home/nikilesh_r98/iot_data
+agent.sources.tail-source.channels = memory-channel
+agent.sources.tail-source.fileHeader = true
+
+agent.sinks.hdfs-sink.type = hdfs
+agent.sinks.hdfs-sink.hdfs.path = /iot_data/
+agent.sinks.hdfs-sink.hdfs.fileType = DataStream
+agent.sinks.hdfs-sink.channel = memory-channel
+
+agent.channels.memory-channel.type = memory
+
+-------------FLUME AGENT COMMAND-----------
+
+/home/nikilesh_r98/apache-flume-1.9.0-bin/bin/flume-ng agent --conf /home/nikilesh_r98/config -f /home/nikilesh_r98/config/config.conf -Dflume.root.logger=DEBUG,console -n agent
+
+
+-------------SPARK JOB TO WRITE THE HDFS FLUME DATA TO KAFKA-----------
+
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._ 
+val userSchema = new StructType()
+ .add("Arrival_Time", "string")
+ .add("Device", "string")
+ .add("gt", "string")
+
+val iot = spark.readStream.format("json")
+ .schema(userSchema)
+ .option("path", "hdfs://10.186.0.3/iot_data/").load()
+ 
+// -------------TOPIC IDLE-----------
+
+val iot_key_val = iot.withColumn("key", lit(100))
+ .select(col("key").cast("string"), concat(col("Arrival_Time"), lit("  "), col("Device"), lit(" "), col("gt")).alias("value")).filter($"gt" === "sit" || $"gt" === "stand")
+val stream = iot_key_val.writeStream
+ .format("kafka")
+ .option("kafka.bootstrap.servers", "localhost:9092")
+ .option("topic", "idle") .option("checkpointLocation", "/home/nikilesh_r98/checkpoint")
+ .outputMode("append")
+ .start()
+
+// -------------TOPIC ACTIVE-----------
+
+val iot_key_val_active = iot.withColumn("key", lit(100))
+ .select(col("key").cast("string"), concat(col("Arrival_Time"), lit("  "), col("Device"), lit(" "), col("gt")).alias("value")).filter($"gt" === "stairsdown" || $"gt" === "stairsup" || $"gt" === "bike" || $"gt" === "walk")
+ 
+--------------
+
+val stream = iot_key_val_active.writeStream
+ .format("kafka")
+ .option("kafka.bootstrap.servers", "localhost:9092")
+ .option("topic", "active") .option("checkpointLocation", "/home/nikilesh_r98/checkpoint-active")
+ .outputMode("append")
+ .start()
+
+-------------KAFKA-----------
+hadoop fs -rm /BigData/*
+rm -rf chkpt
+mkdir chkpt
+rm -rf chkpt2
+mkdir chkpt2
+hadoop fs -copyFromLocal 1-stand.json /BigData/.
+
+
+#### Zookeeper #####
+// start zookeeper from zookeeper directory (only once during a session)
+
+bin/zkServer.sh start
+
+#### KAFKA ####
+//start kafka broker from kafka directory (only need to do this once during the session)
+
+nohup bin/kafka-server-start etc/kafka/server.properties > /dev/null 2>&1 &
+
+// Deleting a topic
+
+bin/kafka-topics --zookeeper localhost:2181 --delete --topic idle
+
+bin/kafka-topics --zookeeper localhost:2181 --delete --topic active
+================================================================================================================================================================
+
+2.a
+
+bin/kafka-topics --create --zookeeper localhost:2181 --replication-factor 1 --partitions 3 --topic idle
+
+bin/kafka-console-consumer --bootstrap-server localhost:9092 --topic idle
+
+spark-shell --master local --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.1.1
+
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._ 
+
+// data is in json format so we provide the schema
+
+val userSchema = new StructType()
+ .add("Arrival_Time", "string")
+ .add("Device", "string")
+ .add("gt", "string")
+
+
+
+val iot = spark.readStream.format("json")
+ .schema(userSchema)
+ .option("path", "hdfs:///BigData/").load()
+
+// to output the data to a Kafka sink, our data should confirm to a key-value pair
+// so we are adding a column called "key" and giving the value of the key to 100
+// for the value, we are sending the arrival time, device and action user performed
+// we are concatenating all three columns and adding a space between columns for differentiating purposes
+
+val iot_key_val = iot.withColumn("key", lit(100))
+ .select(col("key").cast("string"), concat(col("Arrival_Time"), lit("  "), col("Device"), lit(" "), col("gt")).alias("value")).filter($"gt" === "sit" || $"gt" === "stand")
+ 
+--------------
+
+val stream = iot_key_val.writeStream
+ .format("kafka")
+ .option("kafka.bootstrap.servers", "localhost:9092")
+ .option("topic", "idle") .option("checkpointLocation", "file:////home/nikilesh_r98/chkpt")
+ .outputMode("append")
+ .start()
+ 
+
+
+===========================================================================================================================================================================
+
+2.b
+
+bin/kafka-topics --create --zookeeper localhost:2181 --replication-factor 1 --partitions 3 --topic active
+
+bin/kafka-console-consumer --bootstrap-server localhost:9092 --topic active
+
+spark-shell --master local --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.1.1
+
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._ 
+
+// data is in json format so we need to provide the schema
+
+val userSchema = new StructType()
+ .add("Arrival_Time", "string")
+ .add("Device", "string")
+ .add("gt", "string")
+
+
+
+val iot = spark.readStream.format("json")
+ .schema(userSchema)
+ .option("path", "hdfs:///BigData/").load()
+
+// to output the data to a Kafka sink, our data should confirm to a key-value pair
+// so we are adding a column called "key" and giving the value of the key to 100
+// for the value, we are sending the arrival time, device and action user performed
+// we are concatenating all three columns and adding a space between columns so we can tell the difference
+
+//val iot_key_val = iot.withColumn("key", lit(100))
+// .select(col("key").cast("string"), concat(col("Arrival_Time"), lit("  "), col("Device"), lit(" "), col("gt")).alias("value")).filter($"gt" != "sit" & $"gt" != "stand")
+
+
+
+val iot_key_val = iot.withColumn("key", lit(100))
+ .select(col("key").cast("string"), concat(col("Arrival_Time"), lit("  "), col("Device"), lit(" "), col("gt")).alias("value")).filter($"gt" === "stairsdown" || $"gt" === "stairsup" || $"gt" === "bike" || $"gt" === "walk")
+ 
+
+
+val stream = iot_key_val.writeStream
+ .format("kafka")
+ .option("kafka.bootstrap.servers", "localhost:9092")
+ .option("topic", "active") .option("checkpointLocation", "file:////home/nikilesh_r98/chkpt2")
+ .outputMode("append")
+ .start()
+
+
+===========================================================================================================================================================================
+
+-------------ML STREAM-----------
+
+nohup bin/kafka-server-start etc/kafka/server.properties > /dev/null 2>&1 &
+bin/kafka-topics --create --zookeeper localhost:2181 --replication-factor 1 --partitions 3 --topic cancer-pred
+bin/kafka-console-consumer --bootstrap-server localhost:9092 --topic cancer-pred
+spark-shell --master local --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.1.1
+
+
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.ml.feature.{VectorAssembler, StringIndexer}
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
+import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+import org.apache.spark.ml.evaluation.{MulticlassClassificationEvaluator}
+import org.apache.spark.ml.param.ParamMap
+import org.apache.spark.sql.types._
+import org.apache.spark.sql._
+
+val schema = new StructType()
+.add("id", "integer")
+.add("Clump Thickness", "integer")
+.add("UofCSize", "integer")
+.add("UofCShape", "integer")
+.add("Marginal Adhesion", "integer")
+.add("SECSize", "integer")
+.add("Bare Nuclei", "integer")
+.add("Bland Chromatin", "integer")
+.add("Normal Nucleoli", "integer")
+.add("Mitoses", "integer")
+.add("Class", "integer")
+
+val dataStatic = spark.read.format("csv").schema(schema).option("header", "true").load("hdfs://10.128.0.4/mldata/cancer.csv")
+val featuresUsed = dataStatic.select(col("Clump Thickness").cast(FloatType), col("UofCShape").cast(FloatType), col("Marginal Adhesion").cast(FloatType), col("SECSize").cast(IntegerType), col("Class").cast(IntegerType))
+val Array(trainingData, testData) = featuresUsed.randomSplit(Array(0.8, 0.2), 1111)
+val assembler = new VectorAssembler().setInputCols(Array("Clump Thickness", "UofCShape", "Marginal Adhesion", "SECSize")).setOutputCol("assembled-features")
+val decTree = new RandomForestClassifier().setFeaturesCol("assembled-features").setLabelCol("Class").setSeed(1234)
+val pipeline = new Pipeline().setStages(Array(assembler, decTree))
+val evaluator = new MulticlassClassificationEvaluator().setLabelCol("Class").setPredictionCol("prediction").setMetricName("accuracy")
+val paramGrid = new ParamGridBuilder().addGrid(decTree.maxDepth, Array(5,6,7)).addGrid(decTree.maxBins, Array(25,27,29,30)).build()
+val CrossValidator = new CrossValidator().setEstimator(pipeline).setEvaluator(evaluator).setEstimatorParamMaps(paramGrid).setNumFolds(3)
+val model = CrossValidator.fit(trainingData)
+def streamML(df: DataFrame): DataFrame = {
+val predictions  = model.transform(df)
+return predictions
+}
+
+val data = spark.readStream.format("csv").schema(schema).option("header", "true").option("path", "hdfs:///BigData/").load()
+val predictedView = data.transform(streamML).writeStream.format("console").start()
+val streamPredictions = data.transform(streamML)
+val joindf = dataStatic.join(streamPredictions, Seq("id","Clump Thickness","UofCSize","UofCShape","Marginal Adhesion","SECSize","Bare Nuclei","Bland Chromatin","Normal Nucleoli","Mitoses","Class"))
+val streamContent = joindf.select(col("id"), col("class"), col("prediction"))
+val streamContent_key_val = streamContent.withColumn("key", lit(100)).select(col("key").cast("string"), concat(col("id"), lit("| class: "), col("class").cast("string"), lit("| predition: "), col("prediction").cast("string")).alias("value"))
+val stream_data = streamContent_key_val.writeStream.format("kafka")
+ .option("kafka.bootstrap.servers", "localhost:9092")
+ .option("topic", "cancer-pred") .option("checkpointLocation", "file:////home/nikilesh_r98/chkpt")
+ .outputMode("update")
+ .start()
+
+-------------AGGREGATE STREAM AND SAVE IN MYSQL-----------
+
+bin/zkServer.sh start
+bin/zkServer.sh stop
+
+nohup bin/kafka-server-start etc/kafka/server.properties > /dev/null 2>&1 &
+bin/kafka-server-stop
+
+
+bin/kafka-topics --zookeeper localhost:2181 --list
+
+bin/kafka-topics --create --zookeeper localhost:2181 --replication-factor 1 --partitions 3 --topic idle
+bin/kafka-topics --create --zookeeper localhost:2181 --replication-factor 1 --partitions 3 --topic active
+
+bin/kafka-console-consumer --bootstrap-server localhost:9092 --topic idle --consumer-property group.id = idle-consumer-group --consumer-property group.id=idle-consumer-group
+bin/kafka-console-consumer --bootstrap-server localhost:9092 --topic active --consumer-property group.id = active-consumer-group --consumer-property group.id=active-consumer-group
+
+spark-shell --master local --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.1.1
+
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._
+
+val userSchema = new StructType()
+ .add("Arrival_Time", "string")
+ .add("Device", "string")
+ .add("gt", "string")
+
+val iot = spark.readStream.format("json").schema(userSchema).option("path", "hdfs:///BigData/").load()
+
+val iot_group = iot.groupBy(col("gt")).count
+val iot_key_val_active = iot_group.withColumn("key", lit(100)).select(col("key").cast("string"), concat(col("gt"), lit(" "), col("count")).alias("value")).filter($"gt" === "stairsdown" || $"gt" === "stairsup" || $"gt" === "bike" || $"gt" === "walk")
+val iot_key_val_idle = iot_group.withColumn("key", lit(100)).select(col("key").cast("string"), concat(col("gt"), lit(" "), col("count")).alias("value")).filter($"gt" === "sit" || $"gt" === "stand")
+
+val stream_active = iot_key_val_active.writeStream
+.format("kafka")
+.option("kafka.bootstrap.servers", "localhost:9092")
+.option("topic", "active")
+.option("checkpointLocation", "file:////home/nikilesh_r98/chkpt")
+.outputMode("update")
+.start()
+
+val stream_idle = iot_key_val_idle.writeStream
+.format("kafka")
+.option("kafka.bootstrap.servers", "localhost:9092")
+.option("topic", "idle")
+.option("checkpointLocation", "file:////home/nikilesh_r98/chkpt2")
+.outputMode("update")
+.start()
+
+mysql -u root -p
+
+val streamContent = iot.select(col("Arrival_Time"), col("Device"), col("gt"))
+val query = streamContent.writeStream.format("console").start()
+val staticDf = streamContent.select("Arrival_Time", "Device", "gt")
+
+def saveToMySql = (df: Dataset[Row], batchId: Long) => {
+		 val url = """jdbc:mysql://localhost:3306/finalProject"""
+
+		 df
+				 .withColumn("batchId", lit(batchId))
+				 .write.format("jdbc")
+				 .option("url", url)
+				 .option("dbtable", "iotData")
+				 .option("user", "root")
+				 .option("password", "hello")
+				 .mode("append")
+				 .save()
+ }
+
+ staticDf.writeStream
+      .outputMode("append")
+      .foreachBatch(saveToMySql)
+      .start()
+      .awaitTermination()
